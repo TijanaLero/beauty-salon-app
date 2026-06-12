@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Platform, FlatList, ActivityIndicator } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Platform, FlatList, ActivityIndicator, Alert } from 'react-native';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { useLocalSearchParams } from 'expo-router';
+import { auth } from '../../../../lib/firebase';
 import { api } from '../../../../lib/api';
 
 const WORK_START = 9;
@@ -25,12 +26,30 @@ function generateSlots() {
   return slots;
 }
 
+async function getZauzetiSlotovi(kozmeticarId, dateStr) {
+  const data = await api.get('/reservations', {
+    orderBy: '"kozmeticarId"',
+    equalTo: `"${kozmeticarId}"`,
+  });
+
+  const zauzeti = new Set();
+  if (data) {
+    Object.values(data).forEach((r) => {
+      if (r.date === dateStr && r.status === 'active') {
+        zauzeti.add(r.time);
+      }
+    });
+  }
+  return zauzeti;
+}
+
 export default function RezervisanjeScreen() {
   const { kozmeticarId, name } = useLocalSearchParams();
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [showPicker, setShowPicker] = useState(false);
-const [slobodniSlotovi, setSlobodniSlotovi] = useState([]);
+  const [slobodniSlotovi, setSlobodniSlotovi] = useState([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
+  const [bookingSlot, setBookingSlot] = useState(null);
 
   useEffect(() => {
     fetchSlobodneTermine(selectedDate);
@@ -39,27 +58,39 @@ const [slobodniSlotovi, setSlobodniSlotovi] = useState([]);
   const fetchSlobodneTermine = async (date) => {
     setLoadingSlots(true);
     try {
-      const dateStr = formatDate(date);
-      const data = await api.get('/reservations', {
-        orderBy: '"kozmeticarId"',
-        equalTo: `"${kozmeticarId}"`,
-      });
-
-      const zauzeti = new Set();
-      if (data) {
-        Object.values(data).forEach((r) => {
-          if (r.date === dateStr && r.status === 'active') {
-            zauzeti.add(r.time);
-          }
-        });
-      }
-
-      const svi = generateSlots();
-      setSlobodniSlotovi(svi.filter((slot) => !zauzeti.has(slot)));
+    const zauzeti = await getZauzetiSlotovi(kozmeticarId, formatDate(date));
+      setSlobodniSlotovi(generateSlots().filter((slot) => !zauzeti.has(slot)));
     } catch {
       setSlobodniSlotovi(generateSlots());
     } finally {
       setLoadingSlots(false);
+    }
+  };
+    const handleBookSlot = async (time) => {
+    setBookingSlot(time);
+    const dateStr = formatDate(selectedDate);
+    try {
+      const zauzeti = await getZauzetiSlotovi(kozmeticarId, dateStr);
+      if (zauzeti.has(time)) {
+        Alert.alert('Termin zauzet', 'Ovaj termin je upravo rezervisan. Odaberite drugi.');
+        await fetchSlobodneTermine(selectedDate);
+        return;
+    }
+
+       await api.post('/reservations', {
+        date: dateStr,
+        time,
+        kozmeticarId,
+        clientId: auth.currentUser.uid,
+        status: 'active',
+      });
+
+      Alert.alert('Uspješno', `Rezervacija za ${dateStr} u ${time} je potvrđena.`);
+      await fetchSlobodneTermine(selectedDate);
+    } catch {
+        Alert.alert('Greška', 'Rezervacija nije uspjela. Pokušajte ponovo.');
+    } finally {
+      setBookingSlot(null);
     }
   };
 
@@ -97,8 +128,15 @@ const [slobodniSlotovi, setSlobodniSlotovi] = useState([]);
           keyExtractor={(item) => item}
           numColumns={3}
           renderItem={({ item }) => (
-            <TouchableOpacity style={styles.slot}>
-              <Text style={styles.slotText}>{item}</Text>
+            <TouchableOpacity
+              style={[styles.slot, bookingSlot === item && styles.slotLoading]}
+              onPress={() => handleBookSlot(item)}
+              disabled={bookingSlot !== null}
+            >
+              {bookingSlot === item
+                ? <ActivityIndicator size="small" color="#2b6cb0" />
+                : <Text style={styles.slotText}>{item}</Text>
+              }
             </TouchableOpacity>
           )}
           ListEmptyComponent={<Text style={styles.empty}>Nema slobodnih termina za ovaj datum.</Text>}
@@ -135,7 +173,10 @@ const styles = StyleSheet.create({
     borderColor: '#bee3f8',
     backgroundColor: '#ebf8ff',
     alignItems: 'center',
+    minHeight: 44,
+    justifyContent: 'center',
   },
+  slotLoading: { backgroundColor: '#e2e8f0', borderColor: '#cbd5e0' },
   slotText: { fontSize: 15, fontWeight: '600', color: '#2b6cb0' },
   empty: { color: '#a0aec0', textAlign: 'center', marginTop: 24 },
 });
